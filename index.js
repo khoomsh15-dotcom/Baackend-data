@@ -1,3 +1,4 @@
+// index.js
 const express = require("express");
 const cors = require("cors");
 
@@ -7,17 +8,17 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-// Same assets as in Flutter
+// assets set
 const ASSETS = ["BTC", "ETH", "USDT", "SOL", "BNB", "DOGE", "LTC", "USDC"];
 
-// In-memory data (Replit restart hone par reset, for demo this is fine)
-const wallets = {}; // address -> { address, name, balances: {}, transactions: [] }
+// in-memory wallets: address -> { name, address, balances, transactions, pin }
+const wallets = {};
 
+// Address format sample you requested (looks like an ETH address)
 function createAddress() {
-  return (
-    "WALLET_" +
-    Math.random().toString(36).substring(2, 10).toUpperCase()
-  );
+  // For demo: random ETH-like hex (kept simple)
+  const r = () => Math.random().toString(16).slice(2, 10);
+  return "0x" + (r() + r() + r()).slice(0, 40).padEnd(40, "0");
 }
 
 function createEmptyBalances() {
@@ -26,24 +27,27 @@ function createEmptyBalances() {
   return b;
 }
 
-// ---- ROUTES ----
+// --- ROUTES ---
 
-// Health check
+// health
 app.get("/", (req, res) => {
   res.send("Wallet backend running");
 });
 
-// Register new wallet
-// POST /register { name: "Khush" }
+// register new wallet
+// POST /register { name: "Khush", pin: "1234" }
 app.post("/register", (req, res) => {
   const name = req.body.name || "Unnamed";
-
+  const pin = req.body.pin || null; // stored plain (you asked)
   const address = createAddress();
+
   const wallet = {
     name,
     address,
+    pin,
     balances: createEmptyBalances(),
     transactions: [],
+    createdAt: new Date().toISOString(),
   };
 
   wallets[address] = wallet;
@@ -59,17 +63,14 @@ app.post("/register", (req, res) => {
   });
 });
 
-// Get wallet details
+// get wallet details
 // GET /wallet/:address
 app.get("/wallet/:address", (req, res) => {
   const { address } = req.params;
   const wallet = wallets[address];
   if (!wallet) {
-    return res
-      .status(404)
-      .json({ success: false, error: "Wallet not found" });
+    return res.status(404).json({ success: false, error: "Wallet not found" });
   }
-
   return res.json({
     success: true,
     wallet: {
@@ -81,29 +82,20 @@ app.get("/wallet/:address", (req, res) => {
   });
 });
 
-// Admin credit (for demo)
+// admin credit - demo only
 // POST /admin/credit { address, asset, amount }
 app.post("/admin/credit", (req, res) => {
   const { address, asset, amount } = req.body;
-
   const wallet = wallets[address];
   if (!wallet) {
-    return res
-      .status(404)
-      .json({ success: false, error: "Wallet not found" });
+    return res.status(404).json({ success: false, error: "Wallet not found" });
   }
-
   if (!ASSETS.includes(asset)) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Unknown asset symbol" });
+    return res.status(400).json({ success: false, error: "Unknown asset symbol" });
   }
-
   const amt = parseFloat(amount);
   if (isNaN(amt) || amt <= 0) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Invalid amount" });
+    return res.status(400).json({ success: false, error: "Invalid amount" });
   }
 
   wallet.balances[asset] += amt;
@@ -116,96 +108,57 @@ app.post("/admin/credit", (req, res) => {
     to: wallet.address,
     time: new Date().toISOString(),
   };
-
   wallet.transactions.push(tx);
 
-  return res.json({
-    success: true,
-    wallet: {
-      address: wallet.address,
-      balances: wallet.balances,
-    },
-  });
+  return res.json({ success: true, wallet: { address: wallet.address, balances: wallet.balances } });
 });
 
-// Send between wallets
+// send between wallets
 // POST /send { from, to, asset, amount }
 app.post("/send", (req, res) => {
   const { from, to, asset, amount } = req.body;
-
   const fromWallet = wallets[from];
   const toWallet = wallets[to];
 
-  if (!fromWallet) {
-    return res
-      .status(404)
-      .json({ success: false, error: "Sender wallet not found" });
-  }
-  if (!toWallet) {
-    return res
-      .status(404)
-      .json({ success: false, error: "Recipient wallet not found" });
-  }
+  if (!fromWallet) return res.status(404).json({ success: false, error: "Sender wallet not found" });
+  if (!toWallet) return res.status(404).json({ success: false, error: "Recipient wallet not found" });
 
-  if (!ASSETS.includes(asset)) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Unknown asset symbol" });
-  }
+  if (!ASSETS.includes(asset)) return res.status(400).json({ success: false, error: "Unknown asset symbol" });
 
   const amt = parseFloat(amount);
-  if (isNaN(amt) || amt <= 0) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Invalid amount" });
+  if (isNaN(amt) || amt <= 0) return res.status(400).json({ success: false, error: "Invalid amount" });
+
+  if ((fromWallet.balances[asset] || 0) < amt) {
+    return res.status(400).json({ success: false, error: "Insufficient balance" });
   }
 
-  if (fromWallet.balances[asset] < amt) {
-    return res
-      .status(400)
-      .json({ success: false, error: "Insufficient balance" });
-  }
-
-  // Update balances
+  // transfer
   fromWallet.balances[asset] -= amt;
   toWallet.balances[asset] += amt;
 
   const time = new Date().toISOString();
-
-  const txSend = {
-    type: "SEND",
-    asset,
-    amount: amt,
-    from,
-    to,
-    time,
-  };
-  const txReceive = {
-    type: "RECEIVE",
-    asset,
-    amount: amt,
-    from,
-    to,
-    time,
-  };
+  const txSend = { type: "SEND", asset, amount: amt, from, to, time };
+  const txReceive = { type: "RECEIVE", asset, amount: amt, from, to, time };
 
   fromWallet.transactions.push(txSend);
   toWallet.transactions.push(txReceive);
 
   return res.json({
     success: true,
-    fromWallet: {
-      address: fromWallet.address,
-      balances: fromWallet.balances,
-    },
-    toWallet: {
-      address: toWallet.address,
-      balances: toWallet.balances,
-    },
+    fromWallet: { address: fromWallet.address, balances: fromWallet.balances },
+    toWallet: { address: toWallet.address, balances: toWallet.balances },
   });
 });
 
-// ---- START ----
+// simple address search (helper used by front-end)
+app.get("/search/:addr", (req, res) => {
+  const addr = req.params.addr;
+  const found = wallets[addr];
+  if (!found) return res.json({ success: false, found: false });
+  return res.json({ success: true, found: true, wallet: { address: found.address, name: found.name } });
+});
+
+// --- start ---
 app.listen(PORT, () => {
   console.log("Wallet backend running on port", PORT);
 });
